@@ -1,3 +1,4 @@
+using EPiServer.Commerce.Order;
 using EPiServer.Commerce.Routing;
 using EPiServer.Editor;
 using EPiServer.Framework;
@@ -7,21 +8,17 @@ using EPiServer.Globalization;
 using EPiServer.Reference.Commerce.Shared.Models.Identity;
 using EPiServer.Reference.Commerce.Site.Features.Market.Services;
 using EPiServer.Reference.Commerce.Site.Infrastructure.Attributes;
+using EPiServer.Reference.Commerce.Site.Infrastructure.Business;
+using EPiServer.Reference.Commerce.Site.Infrastructure.Facades;
 using EPiServer.Reference.Commerce.Site.Infrastructure.WebApi;
-using EPiServer.Security;
 using EPiServer.ServiceLocation;
 using EPiServer.Web;
 using Mediachase.Commerce;
 using Mediachase.Commerce.Core;
-using Mediachase.Commerce.Security;
-using Mediachase.Commerce.Website.Helpers;
 using Microsoft.AspNet.Identity.Owin;
 using Microsoft.Owin;
 using Microsoft.Owin.Security;
 using Newtonsoft.Json;
-using StructureMap.Web;
-using System;
-using System.Globalization;
 using System.Web;
 using System.Web.Http;
 using System.Web.Mvc;
@@ -36,7 +33,7 @@ namespace EPiServer.Reference.Commerce.Site.Infrastructure
         public void Initialize(InitializationEngine context)
         {
             CatalogRouteHelper.MapDefaultHierarchialRouter(RouteTable.Routes, false);
-            
+
             GlobalFilters.Filters.Add(new HandleErrorAttribute());
             GlobalFilters.Filters.Add(new ReadOnlyFilter());
 
@@ -44,41 +41,42 @@ namespace EPiServer.Reference.Commerce.Site.Infrastructure
             {
                 ContextCondition = r => r.GetOverriddenBrowser().IsMobileDevice
             });
-            
+
             AreaRegistration.RegisterAllAreas();
-            
+
+            DisablePromotionTypes(context);
         }
 
         public void ConfigureContainer(ServiceConfigurationContext context)
         {
-            context.Container.Configure(c =>
-            {
-                c.For<ICurrentMarket>().Singleton().Use<CurrentMarket>();
+            var services = context.Services;
 
-                c.For<Func<string, CartHelper>>()
-                .HybridHttpOrThreadLocalScoped()
-                .Use(() => new Func<string, CartHelper>((cartName) => new CartHelper(cartName, PrincipalInfo.CurrentPrincipal.GetContactId())));
+            services.AddSingleton<ICurrentMarket, CurrentMarket>();
 
-                //Register for auto injection of edit mode check, should be default life cycle (per request)
-                c.For<Func<bool>>()
-                .Use(() => new Func<bool>(() => PageEditing.PageIsInEditMode));                 
+            //Register for auto injection of edit mode check, should be default life cycle (per request to service locator)
+            services.AddTransient<IsInEditModeAccessor>(locator => () => PageEditing.PageIsInEditMode);
 
-                c.For<IUpdateCurrentLanguage>()
-                    .Singleton()
-                    .Use<LanguageService>()
-                    .Setter<IUpdateCurrentLanguage>()
-                    .Is(x => x.GetInstance<UpdateCurrentLanguage>());
+            services.Intercept<IUpdateCurrentLanguage>(
+                (locator, defaultImplementation) =>
+                    new LanguageService(
+                        locator.GetInstance<ICurrentMarket>(),
+                        locator.GetInstance<CookieService>(),
+                        defaultImplementation,
+                        locator.GetInstance<RequestContext>()));
 
-                c.For<Func<CultureInfo>>().Use(() => new Func<CultureInfo>(() => ContentLanguage.PreferredCulture));
+            services.AddTransient<IOrderGroupCalculator, SiteOrderGroupCalculator>(); // TODO: should remove this configuration and calculator class after COM-2434 was resolved
+            services.AddTransient<IOrderFormCalculator, SiteOrderFormCalculator>(); // TODO: should remove this configuration and calculator class after COM-2434 was resolved
 
-                Func<IOwinContext> owinContextFunc = () => HttpContext.Current.GetOwinContext();
-                c.For<ApplicationUserManager>().Use(() => owinContextFunc().GetUserManager<ApplicationUserManager>());
-                c.For<ApplicationSignInManager>().Use(() => owinContextFunc().Get<ApplicationSignInManager>());
-                c.For<IAuthenticationManager>().Use(() => owinContextFunc().Authentication);
-                c.For<IOwinContext>().Use(() => owinContextFunc());
-                c.For<IModelBinderProvider>().Use<ModelBinderProvider>();
-                c.For<SiteContext>().HybridHttpOrThreadLocalScoped().Use<CustomCurrencySiteContext>();
-            });
+            services.AddTransient<PreferredCultureAccessor>(locator => () => ContentLanguage.PreferredCulture);
+
+            services.AddTransient<IOwinContext>(locator => HttpContext.Current.GetOwinContext());
+            services.AddTransient<ApplicationUserManager>(locator => locator.GetInstance<IOwinContext>().GetUserManager<ApplicationUserManager>());
+            services.AddTransient<ApplicationSignInManager>(locator => locator.GetInstance<IOwinContext>().Get<ApplicationSignInManager>());
+            services.AddTransient<IAuthenticationManager>(locator => locator.GetInstance<IOwinContext>().Authentication);
+
+            services.AddTransient<IModelBinderProvider, ModelBinderProvider>();
+            services.AddHttpContextOrThreadScoped<SiteContext, CustomCurrencySiteContext>();
+            services.AddTransient<HttpContextBase>(locator => HttpContext.Current.ContextBaseOrNull());
 
             DependencyResolver.SetResolver(new StructureMapDependencyResolver(context.Container));
             GlobalConfiguration.Configure(config =>
@@ -92,5 +90,16 @@ namespace EPiServer.Reference.Commerce.Site.Infrastructure
         }
 
         public void Uninitialize(InitializationEngine context) { }
+
+        private void DisablePromotionTypes(InitializationEngine context)
+        {
+            //var promotionTypeHandler = context.Locate.Advanced.GetInstance<PromotionTypeHandler>();
+
+            // To disable one of built-in promotion types, for example the BuyQuantityGetFreeItems promotion, comment out the following codes:
+            //promotionTypeHandler.DisablePromotions(new[] { typeof(BuyQuantityGetFreeItems) });
+
+            // To disable all built-in promotion types, comment out the following codes:
+            //promotionTypeHandler.DisableBuiltinPromotions();
+        }
     }
 }
